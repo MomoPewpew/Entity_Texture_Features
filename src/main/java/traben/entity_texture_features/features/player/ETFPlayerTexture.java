@@ -15,6 +15,7 @@ import com.mojang.blaze3d.platform.NativeImage;
 import net.minecraft.client.Minecraft;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.entity.player.Player;
+import traben.entity_texture_features.config.ETFConfig;
 
 import java.io.FileInputStream;
 import java.nio.file.Files;
@@ -43,6 +44,7 @@ import java.nio.file.Path;
 public class ETFPlayerTexture {
 
     public static final String SKIN_NAMESPACE = "etf_skin";
+    private static final int NO_MARKER_RETRY_ATTEMPTS = 3;
 
     public static NativeImage clientPlayerOriginalSkinImageForTool = null;
     public static boolean remappingETFSkin = false;
@@ -76,6 +78,7 @@ public class ETFPlayerTexture {
     ResourceLocation coatEnchantedIdentifier = null;
     boolean hasFatCoat = false;
     private boolean isTextureReady = false;
+    private int noMarkerRetryAttemptsOnFailure = NO_MARKER_RETRY_ATTEMPTS;
     //private boolean hasVanillaCape = false;
     private NativeImage originalSkin;
     //    private NativeImage originalCape;
@@ -89,13 +92,108 @@ public class ETFPlayerTexture {
         return normalVanillaSkinIdentifier;
     }
 
+    private boolean etf$shouldDebugLogSkinChecks() {
+        return ETF.config().getConfig().debugLoggingMode != ETFConfig.DebugLogMode.None;
+    }
+
+    private void etf$debugSkinCheck(String message) {
+        if (!etf$shouldDebugLogSkinChecks()) return;
+        final String playerName = player == null ? "<null>" : player.etf$getName().getString();
+        final String playerId = player == null ? "<null>" : player.etf$getUuidAsString();
+        final boolean inChat = ETF.config().getConfig().debugLoggingMode == ETFConfig.DebugLogMode.Chat;
+        ETFUtils2.logMessage("[SkinCheck] " + playerName + " [" + playerId + "] " + message, inChat);
+    }
+
+    private static void etf$debugLogSkinDownloadUrl(ETFPlayerEntity clientPlayer, String url, String skinCacheKey) {
+        if (ETF.config().getConfig().debugLoggingMode == ETFConfig.DebugLogMode.None) return;
+        final String playerName = clientPlayer == null ? "<null>" : clientPlayer.etf$getName().getString();
+        final String playerId = clientPlayer == null ? "<null>" : clientPlayer.etf$getUuidAsString();
+        final boolean inChat = ETF.config().getConfig().debugLoggingMode == ETFConfig.DebugLogMode.Chat;
+        ETFUtils2.logMessage("[SkinCheck] " + playerName + " [" + playerId + "] skin download url=" + url + " skinCacheKey=" + skinCacheKey, inChat);
+    }
+
+    private static void etf$debugLogSkinFromRenderer(ETFPlayerEntity clientPlayer, ResourceLocation rendererSkin) {
+        if (ETF.config().getConfig().debugLoggingMode == ETFConfig.DebugLogMode.None) return;
+        final String playerName = clientPlayer == null ? "<null>" : clientPlayer.etf$getName().getString();
+        final String playerId = clientPlayer == null ? "<null>" : clientPlayer.etf$getUuidAsString();
+        final boolean inChat = ETF.config().getConfig().debugLoggingMode == ETFConfig.DebugLogMode.Chat;
+        ETFUtils2.logMessage("[SkinCheck] " + playerName + " [" + playerId + "] skin source=renderer_texture id=" + rendererSkin, inChat);
+    }
+
+    private static void etf$debugLogRendererTextureRejected(ETFPlayerEntity clientPlayer, ResourceLocation rendererSkin, String reason) {
+        if (ETF.config().getConfig().debugLoggingMode == ETFConfig.DebugLogMode.None) return;
+        final String playerName = clientPlayer == null ? "<null>" : clientPlayer.etf$getName().getString();
+        final String playerId = clientPlayer == null ? "<null>" : clientPlayer.etf$getUuidAsString();
+        final boolean inChat = ETF.config().getConfig().debugLoggingMode == ETFConfig.DebugLogMode.Chat;
+        ETFUtils2.logMessage("[SkinCheck] " + playerName + " [" + playerId + "] renderer_texture rejected for " + reason + ", falling back to profile download id=" + rendererSkin, inChat);
+    }
+
+    /** True when the ETF marker sentinel block is a single flat color — common for GPU/upload placeholders during skin swaps. */
+    private static boolean etf$sentinelPixelsAreUniformPlaceholder(NativeImage skin) {
+        int v = ETFUtils2.getPixel(skin, 1, 16);
+        return ETFUtils2.getPixel(skin, 0, 16) == v
+                && ETFUtils2.getPixel(skin, 0, 17) == v
+                && ETFUtils2.getPixel(skin, 2, 16) == v
+                && ETFUtils2.getPixel(skin, 3, 16) == v
+                && ETFUtils2.getPixel(skin, 3, 17) == v
+                && ETFUtils2.getPixel(skin, 0, 18) == v
+                && ETFUtils2.getPixel(skin, 0, 19) == v
+                && ETFUtils2.getPixel(skin, 1, 19) == v
+                && ETFUtils2.getPixel(skin, 3, 18) == v
+                && ETFUtils2.getPixel(skin, 2, 19) == v
+                && ETFUtils2.getPixel(skin, 3, 19) == v;
+    }
+
+    private void etf$debugMarkerPixels(NativeImage skin) {
+        if (!etf$shouldDebugLogSkinChecks() || skin == null) return;
+        etf$debugSkinCheck("marker sample actual pixels:"
+                + " (1,16)=" + ETFUtils2.getPixel(skin, 1, 16)
+                + ", (0,16)=" + ETFUtils2.getPixel(skin, 0, 16)
+                + ", (0,17)=" + ETFUtils2.getPixel(skin, 0, 17)
+                + ", (2,16)=" + ETFUtils2.getPixel(skin, 2, 16)
+                + ", (3,16)=" + ETFUtils2.getPixel(skin, 3, 16)
+                + ", (3,17)=" + ETFUtils2.getPixel(skin, 3, 17)
+                + ", (0,18)=" + ETFUtils2.getPixel(skin, 0, 18)
+                + ", (0,19)=" + ETFUtils2.getPixel(skin, 0, 19)
+                + ", (1,19)=" + ETFUtils2.getPixel(skin, 1, 19)
+                + ", (3,18)=" + ETFUtils2.getPixel(skin, 3, 18)
+                + ", (2,19)=" + ETFUtils2.getPixel(skin, 2, 19)
+                + ", (3,19)=" + ETFUtils2.getPixel(skin, 3, 19));
+        etf$debugSkinCheck("marker sample expected pixels:"
+                + " (1,16)=-16776961"
+                + ", (0,16)=-16777089"
+                + ", (0,17)=-16776961"
+                + ", (2,16)=-16711936"
+                + ", (3,16)=-16744704"
+                + ", (3,17)=-16711936"
+                + ", (0,18)=-65536"
+                + ", (0,19)=-8454144"
+                + ", (1,19)=-65536"
+                + ", (3,18)=-1"
+                + ", (2,19)=-1"
+                + ", (3,19)=-1");
+    }
+
     public ETFPlayerTexture(ETFPlayerEntity player, ResourceLocation rendererGivenSkin) {
-        //initiate texture download as we need unprocessed texture from the skin server
         this.player = player;
         this.normalVanillaSkinIdentifier = rendererGivenSkin;
+        etf$runInitialSkinCheck(rendererGivenSkin);
+    }
+
+    public ETFPlayerTexture(ETFPlayerEntity player, ResourceLocation rendererGivenSkin, int noMarkerRetriesRemaining) {
+        this.noMarkerRetryAttemptsOnFailure = Math.max(0, noMarkerRetriesRemaining);
+        this.player = player;
+        this.normalVanillaSkinIdentifier = rendererGivenSkin;
+        etf$runInitialSkinCheck(rendererGivenSkin);
+    }
+
+    private void etf$runInitialSkinCheck(ResourceLocation rendererGivenSkin) {
+        //initiate texture download as we need unprocessed texture from the skin server
+        etf$debugSkinCheck("creating texture wrapper, renderer skin=" + rendererGivenSkin + ", noMarkerRetriesOnFail=" + noMarkerRetryAttemptsOnFailure);
         //triggerSkinDownload();
         if (player instanceof Player) {
             //normal player entity
+            etf$debugSkinCheck("player entity detected, starting immediate checkTexture(false)");
             checkTexture(false);
         } else {
             //create a player texture for a player head block
@@ -124,12 +222,14 @@ public class ETFPlayerTexture {
                 originalSkin = ETFUtils2.emptyNativeImage(64, 64);
                 originalSkin.copyFrom(vanilla);
                 vanilla.close();
+                etf$debugSkinCheck("loaded skin for non-player entity context, running checkTexture(true)");
                 //#endif
 
                 //originalSkin = ETFUtils2.getNativeImageElseNull(rendererGivenSkin);
                 checkTexture(true);
             } catch (Exception e) {
                 //e.printStackTrace();
+                etf$debugSkinCheck("failed loading head/player skin image: " + e.getMessage());
                 skinFailed("player head block failure");
             }
         }
@@ -138,9 +238,44 @@ public class ETFPlayerTexture {
     private static final ETFException TRY_AGAIN_LATER = new ETFException("try again later");
 
     //#if MC >= 12104
+    /**
+     * Pixels for skin checks: either copied from the live renderer texture (already legacy-processed for upload)
+     * or raw bytes from the profile skin download.
+     */
+    private record EtfSkinPixelLoad(
+            NativeImage image,
+            boolean fromRendererTexture,
+            /** Profile URL download ran only after rejecting a uniform (placeholder) renderer read. */
+            boolean profileDownloadAfterUniformRendererReject) {}
+
+    private static @Nullable NativeImage etf$tryLoadPlayerSkinFromRendererTexture(@Nullable ResourceLocation rendererSkin) {
+        if (rendererSkin == null) return null;
+        NativeImage img = ETFUtils2.getNativeImageElseNull(rendererSkin);
+        if (img == null) return null;
+        if (img.getWidth() >= 64 && img.getHeight() >= 64) {
+            return img;
+        }
+        img.close();
+        return null;
+    }
+
     //mostly a copy of new skin downloading code, except we want to grab the nativeImage of the skin itself without any edits
-    public static @NotNull NativeImage getSkinOfPlayer(final ETFPlayerEntity clientPlayer, @Nullable ResourceLocation rendererGivenSkin) throws Exception {
-        //todo renderer given skin will need to be reconsidered how to use in 1.21.4+
+    private static @NotNull EtfSkinPixelLoad etf$loadSkinPixels(final ETFPlayerEntity clientPlayer, @Nullable ResourceLocation rendererGivenSkin) throws Exception {
+        boolean profileDownloadAfterUniformReject = false;
+        if (rendererGivenSkin != null) {
+            NativeImage fromRenderer = etf$tryLoadPlayerSkinFromRendererTexture(rendererGivenSkin);
+            if (fromRenderer != null) {
+                if (etf$sentinelPixelsAreUniformPlaceholder(fromRenderer)) {
+                    etf$debugLogRendererTextureRejected(clientPlayer, rendererGivenSkin,
+                            "uniform sentinel pixels (texture not ready or blank corner)");
+                    fromRenderer.close();
+                    profileDownloadAfterUniformReject = true;
+                } else {
+                    etf$debugLogSkinFromRenderer(clientPlayer, rendererGivenSkin);
+                    return new EtfSkinPixelLoad(fromRenderer, true, false);
+                }
+            }
+        }
 
         String url;
         GameProfile gameProfile;
@@ -205,20 +340,34 @@ public class ETFPlayerTexture {
         try {
             Path path = Minecraft.getInstance().getSkinManager().skinTextures.
                         root.resolve(string.length() > 2 ? string.substring(0, 2) : "xx").resolve(string);
+            etf$debugLogSkinDownloadUrl(clientPlayer, url, string);
             //#if MC >= 12109
-            return downloader.downloadSkin(path, url);
+            return new EtfSkinPixelLoad(downloader.downloadSkin(path, url), false, profileDownloadAfterUniformReject);
             //#else
-            //$$ return SkinTextureDownloader.downloadSkin(path, url);
+            //$$ return new EtfSkinPixelLoad(SkinTextureDownloader.downloadSkin(path, url), false, profileDownloadAfterUniformReject);
             //#endif
         } catch (IOException e) {
             if (rendererGivenSkin != null) {
                 var texture = Minecraft.getInstance().getTextureManager().getTexture(rendererGivenSkin);
-                if(texture instanceof DynamicTexture dynamicTexture){
-                    return Objects.requireNonNull(dynamicTexture.getPixels());
+                if (texture instanceof DynamicTexture dynamicTexture) {
+                    NativeImage px = Objects.requireNonNull(dynamicTexture.getPixels());
+                    NativeImage copy = new NativeImage(px.getWidth(), px.getHeight(), false);
+                    copy.copyFrom(px);
+                    if (!etf$sentinelPixelsAreUniformPlaceholder(copy)) {
+                        etf$debugLogSkinFromRenderer(clientPlayer, rendererGivenSkin);
+                        return new EtfSkinPixelLoad(copy, true, false);
+                    }
+                    etf$debugLogRendererTextureRejected(clientPlayer, rendererGivenSkin,
+                            "uniform sentinel after download IO failure");
+                    copy.close();
                 }
             }
             throw e;
         }
+    }
+
+    public static @NotNull NativeImage getSkinOfPlayer(final ETFPlayerEntity clientPlayer, @Nullable ResourceLocation rendererGivenSkin) throws Exception {
+        return etf$loadSkinPixels(clientPlayer, rendererGivenSkin).image();
     }
     //#endif
 
@@ -231,7 +380,13 @@ public class ETFPlayerTexture {
     // must still create an object as the identifier is important to detect skin changes from other mods
     private ETFPlayerTexture(ResourceLocation rendererGivenSkin, boolean shouldRetryOnFail) {
         this.player = null;
-        this.shouldRetryOnFail = shouldRetryOnFail;
+        this.retryAttemptsRemaining = shouldRetryOnFail ? 1 : 0;
+        this.normalVanillaSkinIdentifier = rendererGivenSkin;
+    }
+
+    private ETFPlayerTexture(ResourceLocation rendererGivenSkin, int retryAttemptsRemaining) {
+        this.player = null;
+        this.retryAttemptsRemaining = Math.max(0, retryAttemptsRemaining);
         this.normalVanillaSkinIdentifier = rendererGivenSkin;
     }
 
@@ -772,21 +927,48 @@ public class ETFPlayerTexture {
     }
 
     public boolean shouldRetryOnFail = false;
+    private int retryAttemptsRemaining = 0;
+
+    public boolean etf$isPlaceholder() {
+        return player == null;
+    }
+
+    public int etf$getRetryAttemptsRemaining() {
+        return retryAttemptsRemaining;
+    }
+
+    public boolean etf$consumeRetryAndShouldRebuild() {
+        if (retryAttemptsRemaining > 0) {
+            retryAttemptsRemaining--;
+            return true;
+        }
+        return false;
+    }
 
     private void skinFailed(String reason) {
         skinFailed(reason, false);
     }
 
     private void skinFailed(@Nullable String reason, boolean retryLater) {
+        etf$debugSkinCheck("skinFailed called, reason=" + reason + ", retryLater=" + retryLater);
         if (!(Minecraft.getInstance().screen instanceof ETFConfigScreenSkinTool)) {
+            int retries = 0;
+            if ("no marker".equals(reason)) {
+                retries = noMarkerRetryAttemptsOnFailure;
+            } else if (retryLater) {
+                // Same budget as no-marker: skin / session / GPU often need several frames (e.g. character managers).
+                retries = noMarkerRetryAttemptsOnFailure;
+            }
+            etf$debugSkinCheck("storing placeholder with retriesRemaining=" + retries);
             ETFManager.getInstance().PLAYER_TEXTURE_MAP.put(player.etf$getUuid(),
-                    new ETFPlayerTexture(normalVanillaSkinIdentifier, retryLater));
+                    new ETFPlayerTexture(normalVanillaSkinIdentifier, retries));
         } else if (reason != null) {
             ETFUtils2.logError("something went wrong applying skin in tool, or skin features are not added: "+ reason);
         }
     }
 
     public void checkTexture(boolean skipSkinLoad) {
+        etf$debugSkinCheck("checkTexture start, skipSkinLoad=" + skipSkinLoad + ", hasOriginal=" + (originalSkin != null));
         if (!skipSkinLoad) {
             try {
                 //#if MC < 12104
@@ -806,10 +988,41 @@ public class ETFPlayerTexture {
                 //$$  fileInputStream.close();
                 //#else
 
-                NativeImage img = getSkinOfPlayer(player, null);
+                EtfSkinPixelLoad load = etf$loadSkinPixels(player, normalVanillaSkinIdentifier);
+                NativeImage img = load.image();
                 remappingETFSkin = true;
-                originalSkin = SkinTextureDownloader.processLegacySkin(img, "ETF pre test, skin check");
+                if (load.fromRendererTexture()) {
+                    originalSkin = new NativeImage(img.getWidth(), img.getHeight(), false);
+                    originalSkin.copyFrom(img);
+                    img.close();
+                    etf$debugSkinCheck("loaded skin from renderer texture (legacy-processed) " + originalSkin.getWidth() + "x" + originalSkin.getHeight());
+                } else {
+                    originalSkin = SkinTextureDownloader.processLegacySkin(img, "ETF pre test, skin check");
+                    etf$debugSkinCheck("downloaded + processed legacy skin " + originalSkin.getWidth() + "x" + originalSkin.getHeight());
+                }
                 remappingETFSkin = false;
+
+                if (!load.fromRendererTexture()
+                        && load.profileDownloadAfterUniformRendererReject()
+                        && player instanceof AbstractClientPlayer
+                        && normalVanillaSkinIdentifier != null
+                        && etf$sentinelPixelsAreUniformPlaceholder(originalSkin)) {
+                    NativeImage lateGpu = etf$tryLoadPlayerSkinFromRendererTexture(normalVanillaSkinIdentifier);
+                    if (lateGpu != null && !etf$sentinelPixelsAreUniformPlaceholder(lateGpu)) {
+                        originalSkin.close();
+                        originalSkin = new NativeImage(lateGpu.getWidth(), lateGpu.getHeight(), false);
+                        originalSkin.copyFrom(lateGpu);
+                        lateGpu.close();
+                        etf$debugSkinCheck("replaced profile decode with late renderer read (GPU ready after placeholder)");
+                    } else {
+                        if (lateGpu != null) {
+                            lateGpu.close();
+                        }
+                        // Profile decode matches GPU (both uniform): valid empty marker corner for Mojang file, or same-frame
+                        // upload race where retries in one tick never see GPU catch up. Use profile pixels — marker check → no features.
+                        etf$debugSkinCheck("GPU sentinel still uniform like profile (upload race or vanilla corner); using profile decode");
+                    }
+                }
                 //#endif
 
                 if (Minecraft.getInstance().player != null && player.etf$getUuid().equals(Minecraft.getInstance().player.getUUID())) {
@@ -818,12 +1031,15 @@ public class ETFPlayerTexture {
 
             } catch (ETFException e) {
                 if (e == TRY_AGAIN_LATER) {
+                    etf$debugSkinCheck("skin load requested retry later");
                     skinFailed(null, true);
                 } else {
+                    etf$debugSkinCheck("skin pre-load ETFException: " + e.getMessage());
                     skinFailed("skin pre load failure: "+ e.getMessage());
                 }
                 return;
             } catch (Exception e) {
+                etf$debugSkinCheck("skin pre-load exception: " + e.getMessage());
                 skinFailed("skin pre load failure: "+ e.getMessage());
                 return;
             }
@@ -835,23 +1051,46 @@ public class ETFPlayerTexture {
         modifiedSkin.copyFrom(originalSkin);
 
         if (originalSkin != null) {
-            if (ETFUtils2.getPixel(originalSkin, 1, 16) == -16776961 &&
-                    ETFUtils2.getPixel(originalSkin, 0, 16) == -16777089 &&
-                    ETFUtils2.getPixel(originalSkin, 0, 17) == -16776961 &&
-                    ETFUtils2.getPixel(originalSkin, 2, 16) == -16711936 &&
-                    ETFUtils2.getPixel(originalSkin, 3, 16) == -16744704 &&
-                    ETFUtils2.getPixel(originalSkin, 3, 17) == -16711936 &&
-                    ETFUtils2.getPixel(originalSkin, 0, 18) == -65536 &&
-                    ETFUtils2.getPixel(originalSkin, 0, 19) == -8454144 &&
-                    ETFUtils2.getPixel(originalSkin, 1, 19) == -65536 &&
-                    ETFUtils2.getPixel(originalSkin, 3, 18) == -1 &&
-                    ETFUtils2.getPixel(originalSkin, 2, 19) == -1 &&
-                    ETFUtils2.getPixel(originalSkin, 3, 18) == -1
-            ) {
+            etf$debugMarkerPixels(originalSkin);
+            boolean markerSignatureVariantA =
+                    ETFUtils2.getPixel(originalSkin, 1, 16) == -16776961 &&
+                            ETFUtils2.getPixel(originalSkin, 0, 16) == -16777089 &&
+                            ETFUtils2.getPixel(originalSkin, 0, 17) == -16776961 &&
+                            ETFUtils2.getPixel(originalSkin, 2, 16) == -16711936 &&
+                            ETFUtils2.getPixel(originalSkin, 3, 16) == -16744704 &&
+                            ETFUtils2.getPixel(originalSkin, 3, 17) == -16711936 &&
+                            ETFUtils2.getPixel(originalSkin, 0, 18) == -65536 &&
+                            ETFUtils2.getPixel(originalSkin, 0, 19) == -8454144 &&
+                            ETFUtils2.getPixel(originalSkin, 1, 19) == -65536 &&
+                            ETFUtils2.getPixel(originalSkin, 3, 18) == -1 &&
+                            ETFUtils2.getPixel(originalSkin, 2, 19) == -1 &&
+                            ETFUtils2.getPixel(originalSkin, 3, 18) == -1;
 
+            boolean markerSignatureVariantB =
+                    // swapped red/blue rows (see README example assets + real-world skins)
+                    ETFUtils2.getPixel(originalSkin, 1, 16) == -65536 &&
+                            ETFUtils2.getPixel(originalSkin, 0, 16) == -8454144 &&
+                            ETFUtils2.getPixel(originalSkin, 0, 17) == -65536 &&
+                            ETFUtils2.getPixel(originalSkin, 2, 16) == -16711936 &&
+                            ETFUtils2.getPixel(originalSkin, 3, 16) == -16744704 &&
+                            ETFUtils2.getPixel(originalSkin, 3, 17) == -16711936 &&
+                            ETFUtils2.getPixel(originalSkin, 0, 18) == -16776961 &&
+                            ETFUtils2.getPixel(originalSkin, 0, 19) == -16777089 &&
+                            ETFUtils2.getPixel(originalSkin, 1, 19) == -16776961 &&
+                            ETFUtils2.getPixel(originalSkin, 3, 18) == -1 &&
+                            ETFUtils2.getPixel(originalSkin, 2, 19) == -1 &&
+                            ETFUtils2.getPixel(originalSkin, 3, 18) == -1;
+
+            if (markerSignatureVariantA || markerSignatureVariantB) {
+                if (markerSignatureVariantB && !markerSignatureVariantA) {
+                    etf$debugSkinCheck("marker signature matched variant B (alternate blue/red arrangement)");
+                } else if (markerSignatureVariantA) {
+                    etf$debugSkinCheck("marker signature matched variant A (default arrangement)");
+                }
 
                 hasFeatures = true;
                 ETFUtils2.logMessage("Found Player {" + player.etf$getName().getString() + "} with ETF texture features in skin.", false);
+                etf$debugSkinCheck("marker signature matched, parsing feature data");
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
                 //locate and convert choices to ints
                 int[] choiceBoxChoices = {
@@ -876,6 +1115,13 @@ public class ETFPlayerTexture {
                 if (choiceBoxChoices[2] < 1 || choiceBoxChoices[2] > 8) {
                     choiceBoxChoices[2] = 1;
                 }
+                etf$debugSkinCheck("choices blink=" + choiceBoxChoices[0]
+                        + ", coat=" + choiceBoxChoices[1]
+                        + ", coatLen=" + choiceBoxChoices[2]
+                        + ", blinkHeight=" + choiceBoxChoices[3]
+                        + ", cape=" + choiceBoxChoices[4]
+                        + ", nose=" + choiceBoxChoices[5]
+                        + ", forceSolid=" + choiceBoxChoices[6]);
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
                 //deprecated old villager nose method
                 boolean noseUpper = (getSkinPixelColourToNumber(ETFUtils2.getPixel(originalSkin, 43, 13)) == 666
@@ -960,6 +1206,7 @@ public class ETFPlayerTexture {
                         ETFUtils2.registerNativeImageToIdentifier(noseTexture, texturedNoseIdentifier);
                     }
                 }
+                etf$debugSkinCheck("nose result hasVillagerNose=" + hasVillagerNose + ", noseType=" + noseType + ", hasTexturedNose=" + (texturedNoseIdentifier != null));
 
 
                 //check for coat bottom
@@ -987,11 +1234,13 @@ public class ETFPlayerTexture {
                 } else {
                     coatIdentifier = null;
                 }
+                etf$debugSkinCheck("coat result style=" + coatStyle + ", length=" + coatLength + ", fatCoat=" + hasFatCoat + ", coatTexture=" + coatIdentifier);
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
                 wasForcedSolid = choiceBoxChoices[6] == 1;
 
                 if (wasForcedSolid) {
                     forceSolidLowerSkin(modifiedSkin);
+                    etf$debugSkinCheck("forced solid lower-skin transparency cleanup");
                 }
 //                if (ETFConfig.getInstance().skinFeaturesEnableTransparency) {
 //                    if (isSkinNotTooTransparent(originalSkin)) {
@@ -1063,6 +1312,7 @@ public class ETFPlayerTexture {
                 }
                 if (blinkSkinFile == null) blinkIdentifier = null;
                 if (blinkSkinFile2 == null) blink2Identifier = null;
+                etf$debugSkinCheck("blink result type=" + blinkType + ", height=" + blinkHeight + ", blink1=" + (blinkIdentifier != null) + ", blink2=" + (blink2Identifier != null));
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -1187,6 +1437,7 @@ public class ETFPlayerTexture {
                         hasEmissives = false;
                     }
                 }
+                etf$debugSkinCheck("emissive result enabled=" + hasEmissives + ", base=" + (emissiveIdentifier != null) + ", blink=" + (blinkEmissiveIdentifier != null) + ", blink2=" + (blink2EmissiveIdentifier != null));
 //                if (capeType == ETFConfigScreenSkinTool.CapeType.ETF) {
 //                    etfCapeEmissiveIdentifier = new Identifier(MOD_ID, "textures/capes/etf_e.png");
 //                }
@@ -1277,6 +1528,7 @@ public class ETFPlayerTexture {
                         hasEnchant = false;
                     }
                 }
+                etf$debugSkinCheck("enchant result enabled=" + hasEnchant + ", base=" + (baseEnchantIdentifier != null) + ", blink=" + (baseEnchantBlinkIdentifier != null) + ", blink2=" + (baseEnchantBlink2Identifier != null));
 
 //                parseSkinTransparency(modifiedSkin, wasForcedSolid);
 
@@ -1336,6 +1588,7 @@ public class ETFPlayerTexture {
 
                 if (normalVanillaSkinIdentifier != null)
                     ETFManager.getInstance().ETF_TEXTURE_CACHE.put(normalVanillaSkinIdentifier, etfTextureOfFinalBaseSkin);
+                etf$debugSkinCheck("finalized ETF skin texture, cached under renderer skin=" + normalVanillaSkinIdentifier);
 
 
                 //if vanilla cape and there is no enchant or emissive
@@ -1368,6 +1621,7 @@ public class ETFPlayerTexture {
 //
 //                } else {
                 skinFailed("no marker");
+                etf$debugSkinCheck("marker signature missing, skipped feature extraction");
 //                }
 
                 // System.out.println("asdasd");
@@ -1376,8 +1630,10 @@ public class ETFPlayerTexture {
         } else {
             //System.out.println("asdasdffsdfsdsd");
             skinFailed("null skin");
+            etf$debugSkinCheck("originalSkin is null");
         }
         isTextureReady = true;
+        etf$debugSkinCheck("checkTexture end, ready=" + isTextureReady + ", hasFeatures=" + hasFeatures + ", canUseFeaturesNow=" + canUseFeaturesForThisPlayer());
     }
 
     public void changeSkinToThisForTool(NativeImage image) {

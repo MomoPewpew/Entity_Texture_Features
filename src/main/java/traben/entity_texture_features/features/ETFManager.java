@@ -287,29 +287,54 @@ public class ETFManager {
     public ETFPlayerTexture getPlayerTexture(ETFPlayerEntity player, ResourceLocation rendererGivenSkin) {
         try {
             UUID id = player.etf$getUuid();
+            int noMarkerRetriesRemaining = -1;
+            boolean debug = ETF.config().getConfig().debugLoggingMode != ETFConfig.DebugLogMode.None;
+            boolean inChat = ETF.config().getConfig().debugLoggingMode == ETFConfig.DebugLogMode.Chat;
+            if (debug) {
+                ETFUtils2.logMessage("[SkinCheck] request texture for " + player.etf$getName().getString() + " [" + id + "] rendererSkin=" + rendererGivenSkin, inChat);
+            }
             if (PLAYER_TEXTURE_MAP.containsKey(id)) {
                 ETFPlayerTexture possibleSkin = PLAYER_TEXTURE_MAP.get(id);
-                if (possibleSkin == null ||
-                        (possibleSkin.player == null && possibleSkin.isCorrectObjectForThisSkin(rendererGivenSkin))) {
+                if (possibleSkin == null) {
+                    if (debug) ETFUtils2.logMessage("[SkinCheck] cache entry exists but is null/placeholder, returning null", inChat);
                     return null;
+                } else if (possibleSkin.etf$isPlaceholder() && possibleSkin.isCorrectObjectForThisSkin(rendererGivenSkin)) {
+                    if (possibleSkin.etf$consumeRetryAndShouldRebuild()) {
+                        noMarkerRetriesRemaining = possibleSkin.etf$getRetryAttemptsRemaining();
+                        if (debug) ETFUtils2.logMessage("[SkinCheck] placeholder retry scheduled, retriesRemaining=" + possibleSkin.etf$getRetryAttemptsRemaining() + ", forcing rebuild", inChat);
+                        PLAYER_TEXTURE_MAP.remove(id);
+                    } else {
+                        if (debug) ETFUtils2.logMessage("[SkinCheck] placeholder has no retries left, returning null", inChat);
+                        return null;
+                    }
                 } else if (possibleSkin.isCorrectObjectForThisSkin(rendererGivenSkin)
                         || Minecraft.getInstance().screen instanceof ETFConfigScreenSkinTool) {
+                    if (debug) ETFUtils2.logMessage("[SkinCheck] cache hit, reusing existing parsed texture object", inChat);
                     return possibleSkin;
                 }
+                if (debug) ETFUtils2.logMessage("[SkinCheck] cache miss due to skin id change, rebuilding", inChat);
             }
             PLAYER_TEXTURE_MAP.put(id, null); // incase of crash
-            ETFPlayerTexture etfPlayerTexture = new ETFPlayerTexture(player, rendererGivenSkin);
+            ETFPlayerTexture etfPlayerTexture = noMarkerRetriesRemaining >= 0
+                    ? new ETFPlayerTexture(player, rendererGivenSkin, noMarkerRetriesRemaining)
+                    : new ETFPlayerTexture(player, rendererGivenSkin);
             var set = PLAYER_TEXTURE_MAP.get(id);
             if (set != null) {
-                if (set.shouldRetryOnFail) { // todo tech debt, need to rewrite this whole player skin system
-                    PLAYER_TEXTURE_MAP.remove(id);
+                if (set.etf$isPlaceholder() && set.etf$getRetryAttemptsRemaining() > 0) { // todo tech debt, need to rewrite this whole player skin system
+                    if (debug) ETFUtils2.logMessage("[SkinCheck] check requested retry, keeping placeholder for next attempt", inChat);
                     return null;
                 }
+                if (debug) ETFUtils2.logMessage("[SkinCheck] constructor populated cache with replacement object, using it", inChat);
                 return set;
             }
             PLAYER_TEXTURE_MAP.put(id, etfPlayerTexture);
+            if (debug) ETFUtils2.logMessage("[SkinCheck] parsed new skin texture and cached it", inChat);
             return etfPlayerTexture;
         } catch (Exception e) {
+            if (ETF.config().getConfig().debugLoggingMode != ETFConfig.DebugLogMode.None) {
+                boolean inChat = ETF.config().getConfig().debugLoggingMode == ETFConfig.DebugLogMode.Chat;
+                ETFUtils2.logError("[SkinCheck] getPlayerTexture failed: " + e.getMessage(), inChat);
+            }
             return null;
         }
     }
